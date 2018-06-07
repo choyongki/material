@@ -102,7 +102,8 @@ function MdCompilerProvider($compileProvider) {
    * @name $mdCompilerProvider#respectPreAssignBindingsEnabled
    *
    * @param {boolean=} respected update the `respectPreAssignBindingsEnabled` state if provided,
-   * otherwise just return the current Material `respectPreAssignBindingsEnabled` state.
+   * otherwise just return the current Material `respectPreAssignBindingsEnabled` state. Attempting
+   * to set this to `false` in AngularJS 1.7+ will throw an exception.
    * @returns {boolean|MdCompilerProvider} current value if used as getter or itself (chaining)
    *  if used as setter
    *
@@ -112,31 +113,45 @@ function MdCompilerProvider($compileProvider) {
    * this doesn't affect directives/components created via regular AngularJS methods which
    * constitute most Material and user-created components.
    *
-   * If disabled (`false`), the compiler assigns the value of each of the bindings to the
-   * properties of the controller object before the constructor of this object is called.
+   * If disabled (`false`) and using an AngularJS version >= 1.5.10 and < 1.7.0, the compiler
+   * assigns the value of each of the bindings to the properties of the controller object before
+   * the constructor of this object is called.
    *
    * If enabled (`true`) the behavior depends on the AngularJS version used:
    *
-   * - `<1.5.10` - bindings are pre-assigned.
-   * - `>=1.5.10 <1.7` - behaves like set to whatever `$compileProvider.preAssignBindingsEnabled()` reports.
-   *    If the `preAssignBindingsEnabled` flag wasn't set manually, it defaults to pre-assigning bindings
-   *    with AngularJS `1.5.x` and to calling the constructor first with AngularJS `1.6.x`.
-   * - `>=1.7` - the compiler calls the constructor first before assigning bindings and
+   * - `<1.5.10`
+   *  - Bindings are pre-assigned.
+   * - `>=1.5.10 <1.7`
+   *  - Respects whatever `$compileProvider.preAssignBindingsEnabled()` reports. If the
+   *    `preAssignBindingsEnabled` flag wasn't set manually, it defaults to pre-assigning bindings
+   *    with AngularJS `1.5` and to calling the constructor first with AngularJS `1.6`.
+   * - `>=1.7`
+   *  - The compiler calls the constructor first before assigning bindings and
    *    `$compileProvider.preAssignBindingsEnabled()` no longer exists.
    *
-   * The default value is `false` but will change to `true` in AngularJS Material 1.2.
+   * Defaults
+   * - The default value is `false` in AngularJS 1.6 and earlier.
+   *  - It is planned to change this to default to `true` in AngularJS Material 1.2.
+   * - In AngularJS 1.7 and later, the value is always `true`. Trying to set the value to false will
+   * throw an exception.
    *
-   * It is recommended to set this flag to `true` in AngularJS Material 1.1.x. The only reason
-   * it's not set that way by default is backwards compatibility. Not setting the flag to `true`
-   * when AngularJS' `$compileProvider.preAssignBindingsEnabled()` is set to `false`
-   * (i.e. default behavior in AngularJS 1.6 or newer) makes it hard to unit test
+   * It is recommended to set this flag to `true` when using AngularJS Material 1.1.x with
+   * AngularJS versions >= 1.5.10 and < 1.7.0. The only reason
+   * it's not set that way by default is backwards compatibility.
+   *
+   * By not setting the flag to `true` when AngularJS' `$compileProvider.preAssignBindingsEnabled()`
+   * is set to `false` (i.e. default behavior in AngularJS 1.6 or newer), unit testing of
    * Material Dialog/Panel/Toast/BottomSheet controllers using the `$controller` helper
-   * as it always follows the `$compileProvider.preAssignBindingsEnabled()` value.
+   * is problematic as it always follows AngularJS' `$compileProvider.preAssignBindingsEnabled()`
+   * value.
    */
-  // TODO change it to `true` in Material 1.2.
-  var respectPreAssignBindingsEnabled = false;
+  var respectPreAssignBindingsEnabled = angular.version.major === 1 && angular.version.minor >= 7;
   this.respectPreAssignBindingsEnabled = function(respected) {
     if (angular.isDefined(respected)) {
+      if (!respected && angular.version.major === 1 && angular.version.minor >= 7) {
+        throw new Error(
+          'Disabling respectPreAssignBindingsEnabled is not supported in AngularJS 1.7 or later.');
+      }
       respectPreAssignBindingsEnabled = respected;
       return this;
     }
@@ -444,27 +459,37 @@ function MdCompilerProvider($compileProvider) {
 
   /**
    * Creates and instantiates a new controller with the specified options.
-   * @param {!Object} options Options that include the controller
+   * @param {!Object} options Options that include the controller function or string.
    * @param {!Object} injectLocals Locals to to be provided in the controller DI.
    * @param {!Object} locals Locals to be injected to the controller.
    * @returns {!Object} Created controller instance.
    */
   MdCompilerService.prototype._createController = function(options, injectLocals, locals) {
-    // The third and fourth arguments to $controller are considered private and are undocumented:
-    // https://github.com/angular/angular.js/blob/master/src/ng/controller.js#L86
-    // Passing `true` as the third argument causes `$controller` to return a function that
-    // gets the controller instance instead returning of the instance directly. When the
-    // controller is defined as a function, `invokeCtrl.instance` is the *same instance* as
-    // `invokeCtrl()`. However, then the controller is an ES6 class, `invokeCtrl.instance` is a
-    // *different instance* from `invokeCtrl()`.
-    var invokeCtrl = this.$controller(options.controller, injectLocals, true, options.controllerAs);
+    var ctrl;
+    if (angular.version.major === 1 && angular.version.minor >= 7) {
+      ctrl = this.$controller(options.controller, injectLocals);
+    } else {
+      // The third argument to $controller is considered private and undocumented.
+      // https://github.com/angular/angular.js/blob/v1.6.10/src/ng/controller.js#L102-L109
+      // This third argument was removed in AngularJS 1.7.1.
+      // Passing `true` as the third argument causes `$controller` to return a function that
+      // gets the controller instance instead of returning the instance directly. When the
+      // controller is defined as a function, `invokeCtrl.instance` is the *same instance* as
+      // `invokeCtrl()`. However, when the controller is an ES6 class, `invokeCtrl.instance` is a
+      // *different instance* from `invokeCtrl()`.
+      var invokeCtrl = this.$controller(options.controller, injectLocals, true);
 
-    if (getPreAssignBindingsEnabled() && options.bindToController) {
-      angular.extend(invokeCtrl.instance, locals);
+      if (getPreAssignBindingsEnabled() && options.bindToController) {
+        angular.extend(invokeCtrl.instance, locals);
+      }
+
+      // Instantiate and initialize the specified controller.
+      ctrl = invokeCtrl();
     }
 
-    // Instantiate and initialize the specified controller.
-    var ctrl = invokeCtrl();
+    if (options.controllerAs) {
+      injectLocals.$scope[options.controllerAs] = ctrl;
+    }
 
     if (!getPreAssignBindingsEnabled() && options.bindToController) {
       angular.extend(ctrl, locals);
